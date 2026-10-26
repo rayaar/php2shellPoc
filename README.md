@@ -501,6 +501,72 @@ required to place `last_dtor` adjacent to a juicier target (e.g., a nearby
 heap-grooming research; this writeup documents the primitive mechanism
 and its bounds so that work can start from a mapped baseline.
 
+### Layer-4 grooming sprint (2026-10-26)
+
+Follow-on investigation to characterize what adjacent memory looks like
+and what grooming would need to achieve. Lab: cal83, 8.3.35, Zend-MM
+chunk at `0x7fad3d600000-0x7fad3d800000` (2MB).
+
+**Arm shape dominates layout.** With a 1 MB `$pad` string in the arm,
+`last_dtor` lands at chunk page 365. Removing the pad entirely (and
+scaling the HUGE string to 5 MB so it still trips `memory_limit=8M`
+inside unserialize) moves `last_dtor` to **page 107**. The small-allocation
+runs holding real `zend_object` / `HashTable` structures (identified by
+the `0x7fad3f8a5860` std_object_handlers pointer repeating across them)
+occupy **pages 86-103** — four pages away from `last_dtor`'s page.
+
+So pad choice shifts the primitive's "neighbourhood" by a megabyte. For
+grooming purposes, the no-pad arm is the right baseline because it puts
+the write page next to the arena's natural working set rather than
+exiling it to the far end of the chunk.
+
+**But the bound is still one page.** `tmp_var` caps `used_slots + num`
+at `VAR_DTOR_ENTRIES_MAX = 255`, so a single arm's `var_dtor_entries`
+is one 4 KB page. Chaining duplicate keys in fire's payload
+(`a:N:{i:0;s:1:"a";i:0;s:1:"b";…}`) advances `used_slots` and gives up
+to 253 further 12-byte pointer writes at `last_dtor + 32 + 16*k` — but
+all 253 land inside the same page. The 254th push triggers a *new*
+`var_dtor_entries` allocation, which rewires `last_dtor` to the fresh
+page (via `(*hashx)->last_dtor->next = new; (*hashx)->last_dtor = new`),
+and the Zend-MM-chosen address of that new allocation is itself just
+another arena page, not attacker-arbitrary.
+
+**What a full chain would need.** The only path from this primitive to
+RCE that fits within the one-page bound would require Zend-MM to allocate
+`sizeof(var_dtor_entries)` (4 KB) at the *same page* as a juicy target
+with an exploitable field at a byte offset the smear can reach. But
+large (≥3 KB) allocations get a dedicated page in Zend-MM; they do not
+share pages with small-allocation runs. So this doesn't happen under
+normal arena behaviour.
+
+The remaining escape route — not implemented here — is to abuse the
+`new var_dtor_entries` allocation path during fire's parse: by advancing
+`used_slots` to 255 in fire's payload, the next `tmp_var` call does
+`emalloc(4KB)` and writes the returned pointer to `(*hashx)->last_dtor->next`
+(which is `arm_last_dtor + 8`). If arm pre-arranged Zend-MM's free-list
+such that this `emalloc` returns an address overlapping a small-alloc
+run page that holds a `zend_object`, the fresh `last_dtor` points into
+that object, and the *next* duplicate-key write lands inside the
+object's layout (its `handlers` pointer is at `+8` of a `zend_object`).
+
+This is a two-step grooming problem — (a) make arm's 4 KB alloc land
+adjacent to small-alloc page boundaries, (b) make fire's secondary 4 KB
+alloc overlap a small-alloc page containing a chosen object. Both require
+free-list manipulation beyond what the current arm's shape achieves. It
+is tractable research, not a dead end — but the engineering effort is
+comparable to the main-chain `PS(http_session_vars)` reclaim, and belongs
+in a dedicated multi-week sprint rather than a context-limited session.
+
+**Baseline left for the next sprint:**
+- Primitive mechanism confirmed and documented
+- Write bounds characterized (one 4 KB page, Zend-MM pointer values only,
+  non-refcounted first-values no-op)
+- Arena layout mapped under both padded and padless arms
+- Juicy target region located (small-alloc pages 86-103 with
+  `std_object_handlers` pointers)
+- Escape mechanism identified (secondary `emalloc` via `used_slots` cap
+  overflow) — not implemented
+
 ### External validation of the research question
 
 Independent researchers converged on the same observation during the two weeks after

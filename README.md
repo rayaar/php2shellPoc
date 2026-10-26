@@ -567,6 +567,63 @@ in a dedicated multi-week sprint rather than a context-limited session.
 - Escape mechanism identified (secondary `emalloc` via `used_slots` cap
   overflow) — not implemented
 
+### Crash primitive confirmed (used_slots scale-up)
+
+Chaining duplicate keys in fire's payload advances `used_slots` by one
+per push. With a clear threshold:
+
+| Fire payload `a:N:{...}` | Observed |
+|---|---|
+| N=253 | OK — response normal |
+| **N=254** | **SIGSEGV in `zend_hash_index_lookup`** |
+| N=256 | SIGSEGV (same crash) |
+
+GDB-captured backtrace at the crash:
+```
+#0 zend_hash_index_lookup (rdi=0xffffffffffffffff, rsi=0, rdx=0x3b=';')
+#1 php_var_unserialize_internal
+#2 php_var_unserialize
+#3 ps_srlzr_decode_php
+#4 php_session_decode
+#5 php_session_initialize
+#6 php_session_rfc1867_update
+#7 php_session_rfc1867_callback
+#8 rfc1867_post_handler
+...
+#13 php_hash_environment
+#14 php_request_startup   ← pre-RINIT window as expected
+```
+
+The HT pointer passed to `zend_hash_index_lookup` is `0xffffffffffffffff`
+(all bits set) — proof that our 16-byte-per-dup writes have corrupted
+either fire's own array HT struct or a Zend-MM slot subsequently
+re-cast as HT*. The `rdx=0x3b` (semicolon byte from the serialized
+stream) suggests the parser mis-reads an idx from the input after HT
+corruption, which argues for an upstream corruption of the parser's
+`rval` zval's `value.arr` field.
+
+**Why the threshold is at N=254**: each dup writes a full 16-byte zval
+(`value` + `type_info` + `u2.extra` via `ZVAL_COPY_VALUE` + `Z_EXTRA`),
+not 12 bytes as I'd initially estimated. The 253rd write lands at
+`last_dtor + 16 + 253*16 = last_dtor + 4064`, filling to +4080 — still
+within the page. The 254th-write path has to touch `used_slots` such
+that it overlaps a header field in the subsequent allocation; concrete
+mechanism needs further tracing.
+
+**Current state of exploit viability**:
+- We now have proof the primitive corrupts memory in a way that
+  reaches fire's unserialize-level state
+- Next step is characterizing WHICH memory location holds the HT
+  pointer at the crash, and controlling the written value (we're
+  writing refcounted-pointer bytes, not an arbitrary 0xffff...ffff —
+  so either the parser interprets our writes differently from what we
+  intended, or an upstream state got poisoned)
+- At minimum this is an unauthenticated remote crash primitive on
+  default-config 8.3.35 Apache mod_php with session.upload_progress
+  enabled (which is default). Pre-RINIT, before any application code
+  runs. Harmless by itself (worker respawns) but confirms the primitive
+  class reaches exploitable state at scale.
+
 ### External validation of the research question
 
 Independent researchers converged on the same observation during the two weeks after

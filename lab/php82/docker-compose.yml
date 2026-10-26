@@ -1,0 +1,37 @@
+services:
+  lab82:
+    image: php:8.2.34-apache
+    container_name: php2shell-lab82
+    ports:
+      - "127.0.0.1:8103:80"
+    volumes:
+      - ../www:/var/www/html
+      - ./php.ini:/usr/local/etc/php/conf.d/zz-custom.ini
+    command: >
+      bash -c "
+      a2dismod mpm_event mpm_worker 2>/dev/null;
+      a2enmod mpm_prefork;
+      apache2-foreground
+      "
+
+  cal82:
+    image: php:8.2.34-apache
+    container_name: php2shell-cal82
+    ports:
+      - "127.0.0.1:8104:80"
+    volumes:
+      - ../www:/var/www/html
+      - ./php.ini:/usr/local/etc/php/conf.d/zz-custom.ini
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - apparmor=unconfined
+    command: >
+      bash -c "
+      a2dismod mpm_event mpm_worker 2>/dev/null;
+      a2enmod mpm_prefork;
+      sed -i 's/MaxRequestWorkers.*/MaxRequestWorkers 1/' /etc/apache2/mods-enabled/mpm_prefork.conf 2>/dev/null;
+      sed -i 's/StartServers.*/StartServers 1/' /etc/apache2/mods-enabled/mpm_prefork.conf 2>/dev/null;
+      apt-get update -qq && apt-get install -y -qq gdb >/dev/null;
+      apache2-foreground
+      "

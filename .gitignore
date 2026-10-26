@@ -1,0 +1,49 @@
+# PHP source trees — reproducible via `wget https://www.php.net/distributions/`
+src/
+
+# Distro packages — reproducible via apt download
+lab/distro/*.deb
+lab/distro/*.ddeb
+
+# Docker volume data
+lab/*/data/
+lab/*/volumes/
+lab/fpm-chain-e/sessions/
+
+# Vendored upstream PoCs — see CREDITS.md for upstream URLs; do not re-distribute
+pocs/3em0-php2shell/
+pocs/neko-php2shell/
+pocs/php-cve-2026-10961x-lab-poc/
+pocs/php2shell-poc/
+pocs/php2shell/lab/debs/
+pocs/php2shell/__pycache__/
+pocs/php2shell/.git-upstream-*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Credentials & secrets
+.gith
+.env
+.env.*
+*.key
+*.pem
+id_rsa*
+credentials*
+
+# Build artifacts
+*.o
+*.lo
+*.la
+*.so
+*.a
+
+# Logs & scratch
+*.log
+scratch/
+tmp/
+.DS_Store

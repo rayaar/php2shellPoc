@@ -1,0 +1,33 @@
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      apache2 apache2-bin ssl-cert \
+      procps strace gdb perl \
+      libargon2-1 libsodium23 libxml2 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Force-install the vulnerable .12 PHP packages (skip dependency resolution)
+COPY php8.3-common_8.3.6-0ubuntu0.24.04.12_amd64.deb /tmp/
+COPY php8.3-opcache_8.3.6-0ubuntu0.24.04.12_amd64.deb /tmp/
+COPY php8.3-readline_8.3.6-0ubuntu0.24.04.12_amd64.deb /tmp/
+COPY php8.3-cli_8.3.6-0ubuntu0.24.04.12_amd64.deb /tmp/
+COPY libapache2-mod-php8.3_8.3.6-0ubuntu0.24.04.12_amd64.deb /tmp/
+RUN dpkg --force-depends -i \
+      /tmp/php8.3-common_8.3.6-0ubuntu0.24.04.12_amd64.deb \
+      /tmp/php8.3-opcache_8.3.6-0ubuntu0.24.04.12_amd64.deb \
+      /tmp/php8.3-readline_8.3.6-0ubuntu0.24.04.12_amd64.deb \
+      /tmp/php8.3-cli_8.3.6-0ubuntu0.24.04.12_amd64.deb \
+      /tmp/libapache2-mod-php8.3_8.3.6-0ubuntu0.24.04.12_amd64.deb && \
+    rm /tmp/*.deb
+
+RUN a2dismod mpm_event 2>/dev/null; a2enmod mpm_prefork php8.3
+RUN rm -f /var/www/html/index.html
+
+COPY zz-distro-cal.ini /etc/php/8.3/apache2/conf.d/99-lab.ini
+COPY zz-distro-cal.conf /etc/apache2/conf-enabled/zz-cal.conf
+COPY www/index.php /var/www/html/index.php
+
+EXPOSE 80
+CMD ["apachectl", "-D", "FOREGROUND"]

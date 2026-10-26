@@ -1,0 +1,28 @@
+# Distro calibration labs — single-worker, SYS_PTRACE for offset extraction.
+# Ports: 8097 = Ubuntu 24.04, 8098 = Rocky 9 (Remi PHP 8.3)
+services:
+  ubuntu2404:
+    build:
+      context: .
+      dockerfile: Dockerfile.ubuntu2404
+    container_name: php2shell-ubuntu2404
+    ports:
+      - "127.0.0.1:8097:80"
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - apparmor:unconfined
+    restart: "no"
+
+  rocky9:
+    build:
+      context: .
+      dockerfile: Dockerfile.rocky9
+    container_name: php2shell-rocky9
+    ports:
+      - "127.0.0.1:8098:80"
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - apparmor:unconfined
+    restart: "no"

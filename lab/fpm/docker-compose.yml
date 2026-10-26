@@ -1,0 +1,33 @@
+services:
+  fpm:
+    image: php:8.3.35-fpm
+    container_name: php2shell-fpm
+    volumes:
+      - ../www:/var/www/html
+      - ./php.ini:/usr/local/etc/php/conf.d/custom.ini
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - apparmor=unconfined
+    environment:
+      - PHP_FPM_PM=static
+      - PHP_FPM_PM_MAX_CHILDREN=5
+    networks:
+      - fpmnet
+
+  nginx:
+    image: nginx:stable
+    container_name: php2shell-fpm-nginx
+    ports:
+      - "127.0.0.1:8102:80"
+    volumes:
+      - ../www:/var/www/html
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - fpm
+    networks:
+      - fpmnet
+
+networks:
+  fpmnet:
+    driver: bridge

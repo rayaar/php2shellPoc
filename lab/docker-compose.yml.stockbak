@@ -1,0 +1,20 @@
+# php2shell research lab — stock php:8.4.26-apache (pre-patch; fixed in 8.4.27).
+# No LFI, no app code, ASLR left ON. Target is a no-op page: the bug is reached
+# pre-application via the rfc1867 upload_progress + OOM path.
+#
+#   docker compose up -d      # or: docker-compose up -d
+#   curl http://127.0.0.1:8090/     -> OK
+#
+services:
+  target:
+    image: php:8.4.26-apache
+    container_name: php2shell-lab
+    ports:
+      - "127.0.0.1:8090:80"      # bound to localhost only
+    volumes:
+      - ./www:/var/www/html:ro
+      - ./conf/zz-lab.ini:/usr/local/etc/php/conf.d/zz-lab.ini:ro
+      - ./conf/zz-php2shell.conf:/etc/apache2/conf-enabled/zz-php2shell.conf:ro
+    # prefork is already the MPM for mod_php; the conf pins it to 1 worker, KeepAlive Off.
+    # ASLR is the host kernel's randomize_va_space (left as-is, i.e. ON).
+    restart: "no"

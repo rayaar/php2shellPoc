@@ -1,0 +1,14 @@
+services:
+  lab85:
+    image: php:8.5.11-apache
+    container_name: php2shell-lab85
+    ports:
+      - "127.0.0.1:8105:80"
+    volumes:
+      - ../www:/var/www/html
+    command: >
+      bash -c "
+      a2dismod mpm_event mpm_worker 2>/dev/null;
+      a2enmod mpm_prefork;
+      apache2-foreground
+      "

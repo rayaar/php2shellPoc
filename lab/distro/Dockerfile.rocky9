@@ -1,0 +1,13 @@
+FROM rockylinux:9
+RUN dnf install -y https://rpms.remirepo.net/enterprise/remi-release-9.rpm && \
+    dnf module reset php -y && \
+    dnf module enable php:remi-8.3 -y && \
+    dnf install -y httpd php php-cli php-common procps-ng strace gdb perl && \
+    dnf clean all
+
+COPY zz-distro-cal.ini /etc/php.d/99-lab.ini
+COPY zz-distro-rocky.conf /etc/httpd/conf.d/zz-cal.conf
+COPY www/index.php /var/www/html/index.php
+
+EXPOSE 80
+CMD ["/usr/sbin/httpd", "-D", "FOREGROUND"]

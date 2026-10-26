@@ -742,6 +742,57 @@ plant a session file of 3073-4096 bytes containing a duplicate-key
 array. Worker respawns, so repeated firing is a sustained-worker-churn
 DoS, not persistent compromise.
 
+### Session-file overlay path (secondary RCE attempt — also denied)
+
+Follow-up test: can a large session file (3+ pages, 8-12 KB) cause its
+own zend_string allocation to land at the dangling struct's own pages,
+giving attacker-chosen bytes at the dangling struct layout? That would
+yield a true write-what-where via attacker-chosen `last_dtor`.
+
+Measurement for N=700 and N=900 payloads (8410 and 10810 bytes
+respectively, both 3-page allocs):
+- Dangling struct at page 104: **intact** after fire — bytes preserved
+  from arm (`last=0x...668038`, `first_dtor=0x...66b000`)
+- Session file content lands at **pages 107-109**, overwriting arm's
+  var_dtor_entries buffer with attacker-chosen session-ASCII bytes
+- Fire's tmp_var reads `last_dtor->used_slots` from attacker bytes
+  (ASCII "x|a:" → 977428088 as little-endian uint32) → check
+  `977428088 + 1 > 255` is TRUE → allocates a fresh var_dtor_entries
+  elsewhere, abandoning the attacker-overlayed region
+
+So attacker bytes DO land on page 107, but fire's parser bypasses the
+dangling buffer entirely once it reads the garbage used_slots. The
+overlay doesn't translate into exploitable control.
+
+To make this path work, Zend-MM would need to allocate the session
+file zend_string starting at **page 104** (the dangling struct itself),
+not page 107. Observed natural free-list behavior puts it at 107-109.
+Steering it to 104-106 would need deliberate pre-fire grooming to
+mark pages 104+ as first-fit, which isn't achievable through the
+HTTP-reachable primitives available here.
+
+### Final verdict on A (crash → RCE)
+
+**Denied for default-config exploitation.** Two concrete escape paths
+tested and ruled out:
+
+1. **HT_INVALID_IDX overwrite** of `current`: writes fixed `0xFFFFFFFF`
+   (sentinel from PHP's own init), not an attacker-chosen value.
+   Produces crash only.
+2. **Session-file content overlay** of dangling buffer: delivers
+   attacker bytes to page 107, but fire's own tmp_var logic rejects
+   the attacker-overlayed buffer (ASCII bytes interpreted as huge
+   used_slots → fresh buffer allocated instead).
+
+The RCE path through this layer-4 primitive would require either:
+- A different arm shape that moves the dangling struct onto a page
+  that Zend-MM's free-list first-fit DOES choose for session file
+  allocation (steerable with much deeper grooming)
+- A completely different write primitive mechanism (not reachable
+  from the HT init or session overlay we've characterized)
+
+Both are multi-week research efforts. Committing the honest denial.
+
 ### External validation of the research question
 
 Independent researchers converged on the same observation during the two weeks after

@@ -663,20 +663,84 @@ Routes to that second weakness, in roughly increasing weirdness:
 - **Application that stores attacker-controlled serialized blobs in
   `$_SESSION`** — if the app does e.g. `$_SESSION['user'] = unserialize(user_input)`
   (which is already a vuln), the content is attacker-chosen. Rare.
-- **PHP's own `session.upload_progress` write path** — the open-ended
-  avenue we haven't explored: whether a crafted prior upload can cause
-  PHP to serialize an array with the exact duplicate-key structure into
-  the session file. Would need the progress-write code to accept
-  attacker-shaped bytes verbatim; probably no, but not yet verified.
-  Worth a focused look.
+- **PHP's own `session.upload_progress` write path** — **ruled out**
+  by source review (ext/session/session.c:3177-3198 and :3080). The
+  progress-update path builds `progress->data` via `add_assoc_long_ex`
+  / `add_assoc_string_ex` / `add_assoc_bool_ex` / `add_assoc_zval_ex`
+  with hard-coded string keys ("start_time", "content_length",
+  "bytes_processed", "done", "files"), then stores it under a string
+  key via `zend_hash_update(Z_ARRVAL_P(sess_var), progress->key.s, ...)`.
+  `php_session_flush` then serializes $_SESSION — PHP arrays are HashTables
+  that cannot contain duplicate keys at the C level, so the serializer's
+  output cannot contain duplicate-key bytes. The duplicate-key structure
+  must come from somewhere **outside** PHP's own write code.
 
 **Honest end-state of this session's grooming sprint**:
 - Primitive mechanism fully characterized, bounds mapped
 - Deterministic 10/10 crash primitive against stock 8.3.35 confirmed
 - Secondary-vector dependency explicit — the stock exploitability
   story matches sveoti.net's "needs a second weakness"
-- Session-write path as a potential natural trigger: open question for
-  the next sprint
+- Session-write path as a potential natural trigger: **ruled out**
+  (see **B denied** section above)
+
+### Crash-primitive mechanism (byte-level, 2026-10-26)
+
+Reverse-engineering the N=254 threshold uncovered exactly why the
+primitive at scale crashes while small-scale usage doesn't:
+
+**Fire's call chain** (session decode in dangerous path):
+1. `ps_srlzr_decode_php` → `var_tmp_var(&var_hash)` → returns
+   `current = dangling_last_dtor + 32` (slot inside arm's leftover
+   `var_dtor_entries` on page 107).
+2. `php_var_unserialize(current, &q, endptr, &var_hash)` enters array
+   parse for `a:N:{...}`.
+3. `array_init_size(current, N)` → `_zend_new_array(N)` + `zend_hash_real_init_mixed`.
+4. The `real_init_mixed` memset fills the HT's hash-index region
+   (`HT_HASH_SIZE(nTableMask) = 2 * nTableSize * sizeof(uint32_t)` bytes)
+   with `HT_INVALID_IDX = 0xFFFFFFFF`.
+
+**The crash window at N=254..~330**:
+
+| State at N=254 | State at N=253 |
+|---|---|
+| Session file payload = 3058 bytes | 3046 bytes |
+| Zend-MM alloc of payload `zend_string` = 3074 bytes | 3062 bytes |
+| **Above 3072-byte small-bin cap → 1-page alloc** | **At 3072-byte cap → small-bin alloc** |
+| Payload takes a page in the arena | Doesn't take a page |
+| Subsequent HT `arData` alloc (10KB, 3 pages) lands with its hash-index segment overlapping page 107 | HT lands elsewhere, page 107 untouched |
+| `real_init_mixed` memset writes `0xFFFFFFFF`×512 across page 107 offset 0..0x7FF | Page 107 preserved |
+| `current` at page 107 offset 0x20 reads as `0xFFFFFFFFFFFFFFFF` | `current` intact |
+| `Z_ARRVAL_P(current) = -1`, lookup crashes | Parse succeeds |
+
+Empirical GDB dump of page 107 confirms exactly this: all 0xFF for the
+first 2048 bytes under N=254, intact var_dtor_entries header (`used_slots=4,
+data[0]={object_ptr, IS_OBJECT}`) under N=253.
+
+**N > ~330 (OK again)**: the payload crosses the 1-page boundary; Zend-MM
+has to find a 2+-page contiguous run, which can't start at page 107 (not
+enough adjacent free). HT `arData` lands at a different chunk range, no
+aliasing with `current`.
+
+### Why this isn't trivially upgradable to RCE
+
+The primitive's write-value is the fixed sentinel `0xFFFFFFFF` from PHP's
+own HT initialization, not an attacker-chosen value. We don't get the
+"write what where" shape the main-chain exploit achieves via forged
+`zend_string` + offset leak. From here to RCE would need either:
+
+1. A DIFFERENT dangling-pointer mechanism where attacker bytes get
+   memcpy'd *into* a predictable overlap with a function-pointer field
+   (e.g., pDestructor at HT+48). Current primitive writes 0xFF to the
+   hash-index region, which doesn't contain function pointers.
+2. Chained with a secondary vector that already provides partial control
+   (the "second weakness" matching the stock-config caveat above).
+
+So the final honest state: **this is a crash primitive, not an RCE primitive**.
+Unauthenticated remote worker-crash on default-config 8.3.35 Apache
+mod_php with session.upload_progress on (default) when the attacker can
+plant a session file of 3073-4096 bytes containing a duplicate-key
+array. Worker respawns, so repeated firing is a sustained-worker-churn
+DoS, not persistent compromise.
 
 ### External validation of the research question
 

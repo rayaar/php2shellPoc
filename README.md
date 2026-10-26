@@ -450,6 +450,57 @@ defense-in-depth is appropriate. Consistent with sveoti.net's thesis — this
 is exactly the kind of "second-weakness-amplifying" primitive the author
 flagged as the real risk.
 
+### Layer-4 addendum: parse-time write primitive (confirmed 2026-10-26)
+
+Follow-up GDB measurement on 8.3.35 identified a *second* exploitation
+surface distinct from the destroy-chain path above:
+
+```
+php_var_unserialize → var_push_dtor_value → tmp_var(hashx, 1)
+  reads   (*hashx)->last_dtor        ← ATTACKER-SHAPED (dangling struct)
+  writes  ZVAL_UNDEF at data[used_slots]  (12 bytes)
+  returns ptr
+ZVAL_COPY_VALUE(ptr, rval)           ← writes {Z_VAL_P(rval), Z_TYPE_INFO_P(rval)}
+```
+
+Empirically on cal83 (fresh arm, planted session file, multipart POST fire):
+
+| Field | Value |
+|---|---|
+| Dangling d (BG(unserialize).data) | `0x7fad3d76a000` |
+| Arm-shaped `d->last_dtor` | `0x7fad3d76d000` |
+| `used_slots` at fire's entry | `1` |
+| Write address | `last_dtor + 32` = `0x7fad3d76d020` |
+| Written zval | `{Z_VAL_P(rval), 0x106}` — zend_string + IS_STRING_EX |
+
+This is a **parse-time** write — the write happens inside the parser itself,
+not inside var_destroy. No `BG(serialize_lock) > 0` is required at destroy;
+the original memo's blocker (no natural lock transition on default config)
+does **not** apply here.
+
+**But the primitive is bounded in two dimensions:**
+
+1. **Address bound**: `last_dtor` is a Zend-MM slot from arm's own
+   `emalloc(sizeof(var_dtor_entries))`. The write lands within that one
+   ~4KB slot. Making the write address arbitrary requires Zend-MM free-list
+   grooming — same difficulty class as the main-chain reclaim.
+
+2. **Value bound**: ZVAL_COPY_VALUE copies the OLD zval. For a refcounted
+   old value (string/object/array/reference), that's a pointer into Zend-MM.
+   We don't control what the pointer points at except insofar as fire's
+   payload bytes shape the content fresh allocation lands with. For
+   non-refcounted first-values (long/bool/null) `Z_REFCOUNTED_P` short-circuits
+   and no write happens — confirmed empirically with a `i:X;` first value
+   produces no watchpoint hit.
+
+**Takeaway**: the layer-4 primitive gives a parse-time 16-byte-aligned
+pointer-smear within an arm-allocated 4KB region, with no destroy-time
+trigger needed. To escape the 4KB bound, Zend-MM free-list grooming is
+required to place `last_dtor` adjacent to a juicier target (e.g., a nearby
+`zend_object.handlers` field within the write range). That's open-ended
+heap-grooming research; this writeup documents the primitive mechanism
+and its bounds so that work can start from a mapped baseline.
+
 ### External validation of the research question
 
 Independent researchers converged on the same observation during the two weeks after

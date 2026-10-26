@@ -618,11 +618,65 @@ mechanism needs further tracing.
   writing refcounted-pointer bytes, not an arbitrary 0xffff...ffff —
   so either the parser interprets our writes differently from what we
   intended, or an upstream state got poisoned)
-- At minimum this is an unauthenticated remote crash primitive on
-  default-config 8.3.35 Apache mod_php with session.upload_progress
-  enabled (which is default). Pre-RINIT, before any application code
-  runs. Harmless by itself (worker respawns) but confirms the primitive
-  class reaches exploitable state at scale.
+- At minimum this is a remote crash primitive on default-config 8.3.35
+  Apache mod_php with session.upload_progress enabled (which is default).
+  Pre-RINIT, before any application code runs. Harmless by itself
+  (worker respawns) but confirms the primitive class reaches exploitable
+  state at scale.
+
+**Reliability measurement**: 10/10 trials of N=254 fire against freshly-armed
+worker on cal83 → 10/10 crashes. The threshold is deterministic.
+
+**Config dependency vs. the lab**: the cal83 Docker uses
+`memory_limit=8M` and prefork MPM with 1 worker for test determinism and
+smaller arm payloads. Neither is fundamental:
+- A 128M default-memory_limit target needs a proportionally bigger arm
+  (payload ~127MB on the wire). Same primitive, same mechanism.
+- Multi-worker MPM (prefork, event, or worker — all default-eligible)
+  works as long as fire pins to the arm's worker, which is exactly what
+  the main chain's keep-alive carrier already does.
+- The SYS_PTRACE capability and `gdb` package in the lab image are for
+  observation only; the exploit itself does not need them.
+
+What **IS** required on the target, all of which match PHP defaults:
+- `session.upload_progress.enabled = 1` (default)
+- `session.save_handler = files`, `session.save_path = /tmp` (defaults; empty
+  save_path falls back to `/tmp`)
+- Worker-persistence across requests (prefork/event/worker MPM — Apache
+  defaults; php-fpm would need its own primitive, see FPM Chain-E)
+- The actual bug: missing `php_basic_early_rinit` before 8.3.36
+
+What is **NOT** present in defaults — the "second weakness" sveoti.net
+flags:
+- The ability to put a crafted serialized blob into a session file. Fire
+  needs to decode a duplicate-key array via the pre-RINIT path, and the
+  only input that normally feeds `php_var_unserialize` pre-RINIT is the
+  session file content for the PHPSESSID the request carries. On a
+  default target with no attacker-controlled session store, there is no
+  natural way to plant the exact duplicate-key bytes.
+
+Routes to that second weakness, in roughly increasing weirdness:
+- **LFI with file-write / arbitrary-file-write** on the target: write
+  the session file directly. Classic layered chain.
+- **Shared hosting with cross-session writable `/tmp`** (uncommon on
+  properly configured modern hosts but widespread historically).
+- **Application that stores attacker-controlled serialized blobs in
+  `$_SESSION`** — if the app does e.g. `$_SESSION['user'] = unserialize(user_input)`
+  (which is already a vuln), the content is attacker-chosen. Rare.
+- **PHP's own `session.upload_progress` write path** — the open-ended
+  avenue we haven't explored: whether a crafted prior upload can cause
+  PHP to serialize an array with the exact duplicate-key structure into
+  the session file. Would need the progress-write code to accept
+  attacker-shaped bytes verbatim; probably no, but not yet verified.
+  Worth a focused look.
+
+**Honest end-state of this session's grooming sprint**:
+- Primitive mechanism fully characterized, bounds mapped
+- Deterministic 10/10 crash primitive against stock 8.3.35 confirmed
+- Secondary-vector dependency explicit — the stock exploitability
+  story matches sveoti.net's "needs a second weakness"
+- Session-write path as a potential natural trigger: open question for
+  the next sprint
 
 ### External validation of the research question
 

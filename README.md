@@ -109,7 +109,7 @@ sufficient heap structure is established), making grooming fragile under load. T
 `probe_oom` starts at 8MB and finds the first size that triggers; this gives optimal
 trigger timing for any `memory_limit` configuration.
 
-### Results: direct connection (25-worker lab, `reliability.py`)
+### Results: direct connection (25-worker lab)
 
 With the adaptive OOM probe and spray=20 threads — measured across fresh lab restarts:
 
@@ -864,7 +864,7 @@ never seen before."
   unimplemented `sh<file` hint. Egress-filtered targets still need the out-of-line buffer.
 
   **Out-of-line buffer — CONDITIONALLY SOLVED** (only needed when egress is blocked):
-  built the mechanism (`outofline.py`: arg1 → separate 192-bin zend_string buffer,
+  built the mechanism (arg1 → separate 192-bin zend_string buffer,
   cmd up to ~143B; sound in principle — `zif_system` reads arg1 by pointer).
   **Earlier attempts failed on placement** (blind sweep: 0 hits; `/proc` racing scan:
   0 hits because the buffer is live only ~ms per reclaim and worker PID shifts; the
@@ -921,18 +921,21 @@ never seen before."
     SNI skipped for IP-literal targets (some stacks reject invalid SNI).
     Helper fns `_is_ip_literal()`, `_host_header()` with unit tests.
 
-- `php2shell_ka.py` — earlier driver (imports alvarodh5's exploit.py). Has keep-alive
-  transport, chunked-TE, `--stage2`, `--htdata`. Being superseded by php2shell.py.
-- `reliability.py` — reliability test harness: runs the exploit under configurable
-  background load patterns (GET/mixed/upload/burst), measures success rate and time-to-shell
-  with fresh lab restarts between configs. Produced the results tables above.
-- `serve_stage2.py` — hosts the stage-2 payload (`--revshell HOST:PORT` or `--payload FILE`),
-  logs each target fetch live as callback confirmation.
-- `lab/` — stock docker-compose + Apache/PHP conf, multi-worker and calibration variants.
+- `pocs/php2shell/php2shell.py` — main exploit driver (mod_php chain + FPM Chain-E port).
+- `pocs/php2shell/extract_offsets.py` — operator calibration tool (pulls `zif_system` +
+  `zval_ptr_dtor` offsets from any `libphp.so` / `php-fpm` binary via `zend_function_entry`
+  scan; handles both direct-byte and R_X86_64_RELATIVE builds).
+- `pocs/php2shell/php2sweep.py` — batch probe/exploit/report harness for internal scope
+  (CIDR, nmap XML, scope lists).
+- `pocs/php2shell/serve_stage2.py` — hosts the stage-2 payload (`--revshell HOST:PORT`
+  or `--payload FILE`), logs each target fetch live as callback confirmation.
+- `pocs/php2shell/listener.py` — minimal callback listener.
+- `pocs/php2shell/stage2.sh` — template reverse-shell payload (edit `LHOST`/`LPORT`).
+- `lab/` — stock docker-compose + Apache/PHP conf for research reproduction.
 
 ## Parked: fully offset-free resolution (improvement "A")
 
-`spike_a2.pl` proved a data path to `zif_system` exists with no per-build offset
+A data path to `zif_system` exists with no per-build offset
 (`compiler_globals` is a dynsym export → `function_table` → `"system"` → `handler`).
 But it requires an **arbitrary read**, and this bug's leak is only a *relative window*
 dump (zend_string stores data inline), not a pointer-following read. No public PoC has

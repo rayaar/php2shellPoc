@@ -220,7 +220,7 @@ hard part that may or may not fall. Build A1 first against our working lab chain
 probe for an A2 path, and report honestly how far it goes. Fold in neko's chunked-TE
 and spray regardless — they're clear wins.
 
-### A2 SPIKE RESULT (confirmed feasible) — spike_a2.pl via /proc oracle
+### A2 SPIKE RESULT (confirmed feasible) — proven via /proc oracle
 Proven on the live lab process (base 0x73a8879df000):
 ```
 compiler_globals (+0x132db00, dynsym-exported) +0x38 -> function_table HashTable
@@ -269,16 +269,16 @@ alvarodh5's leak code: stage1/stage2 only dump heap at PS(id)+0x18. So A is park
 Pivoted to the reliability problem (user's idea) and it paid off.
 
 ### What we proved empirically (lab: stock php:8.4.26-apache, KeepAlive On, 25 workers)
-1. **Keep-alive pins to one worker.** 3 GETs on one socket -> same PID. (test_pin.py)
+1. **Keep-alive pins to one worker.** 3 GETs on one socket -> same PID.
 2. **The 619 OOM is a bailout, not a crash** — the worker AND the keep-alive
    connection survive it. 6 rounds of (OOM + probe) on one socket -> same PID every
-   time, Connection stays Keep-Alive. (test_multi.py) The earlier `Connection: close`
+   time, Connection stays Keep-Alive. The earlier `Connection: close`
    was purely our `KeepAlive Off`, not the OOM.
 3. **Prefork workers share ASLR.** libphp base (0x79255b3dd000) AND the Zend MM chunk
    (0x792559800000) are identical across all workers — children inherit the master's
    layout via fork. Verified via /proc across pids 1/27/36/44.
 
-### The technique (ka_exploit.py)
+### The technique (now folded into php2shell.py)
 - Run the whole chain over ONE keep-alive connection -> arm + leak hit the SAME
   worker deterministically, no spray, regardless of worker count.
 - Because bases are shared across workers, leak ONCE, then fire each stage-3 attempt
@@ -288,7 +288,7 @@ Pivoted to the reliability problem (user's idea) and it paid off.
 ### Result — the demonstrable win
 - ORIGINAL alvarodh5 (fresh Connection: close per request) on the 25-worker lab:
   **stage 1 heap leak FAILS** — arm and leak land on different workers.
-- Our keep-alive ka_exploit.py on the same lab: **full in-band RCE, 3/3 runs, attempt 1,
+- Our keep-alive driver on the same lab: **full in-band RCE, 3/3 runs, attempt 1,
   uid=33(www-data).**
 
 That's the shippable contribution: the other PoCs assume a single worker (or neko's
@@ -298,4 +298,4 @@ reverse proxy / LB that pools backend connections can break the 1:1 connection->
 mapping; there, sticky-session affinity helps reach one backend, and a keep-alive-batched
 arm+fire pair is still better than naive spray. Not yet tested through a proxy.
 
-Artifacts: lab/ (compose + conf), ka_exploit.py, test_pin.py, test_multi.py, spike_a2.pl.
+Artifacts: `lab/` (compose + conf), `pocs/php2shell/php2shell.py` (keep-alive driver).

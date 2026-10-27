@@ -55,50 +55,123 @@ def _nm_dyn(path):
     return syms
 
 
+def _parse_loads(d):
+    """Return LOAD segments as [(file_off, vaddr, fsz)]."""
+    e_phoff = struct.unpack_from("<Q", d, 0x20)[0]
+    e_phentsize, e_phnum = struct.unpack_from("<HH", d, 0x36)
+    loads = []
+    for i in range(e_phnum):
+        p = e_phoff + i * e_phentsize
+        p_type = struct.unpack_from("<I", d, p)[0]
+        if p_type != 1: continue
+        p_off, p_vaddr = struct.unpack_from("<QQ", d, p + 8)
+        p_fsz = struct.unpack_from("<Q", d, p + 32)[0]
+        loads.append((p_off, p_vaddr, p_fsz))
+    return loads
+
+
+def _off_to_vma(loads, off):
+    for p_off, p_vaddr, p_fsz in loads:
+        if p_off <= off < p_off + p_fsz:
+            return p_vaddr + (off - p_off)
+    return None
+
+
+def _vma_to_off(loads, vma):
+    for p_off, p_vaddr, p_fsz in loads:
+        if p_vaddr <= vma < p_vaddr + p_fsz:
+            return p_off + (vma - p_vaddr)
+    return None
+
+
+def _parse_relative_relocs(d):
+    """Return dict {r_offset(VMA): r_addend(VMA)} for R_X86_64_RELATIVE entries
+    from .rela.dyn / .rela.plt / etc. Needed when the binary stores const
+    string pointers as 0 in the file and the dynamic linker patches them at
+    load time (Rocky's Remi build does this; Sury's build embeds direct VMAs
+    in the file bytes so this map is just a fallback)."""
+    e_shoff = struct.unpack_from("<Q", d, 0x28)[0]
+    e_shentsize, e_shnum = struct.unpack_from("<HH", d, 0x3A)
+    reloc_map = {}
+    for i in range(e_shnum):
+        o = e_shoff + i * e_shentsize
+        typ = struct.unpack_from("<I", d, o + 4)[0]
+        if typ != 4: continue  # SHT_RELA
+        off, size = struct.unpack_from("<QQ", d, o + 24)
+        ent = struct.unpack_from("<Q", d, o + 56)[0]
+        if not ent: continue
+        for j in range(size // ent):
+            p = off + j * ent
+            r_off = struct.unpack_from("<Q", d, p)[0]
+            r_info = struct.unpack_from("<Q", d, p + 8)[0]
+            r_addend = struct.unpack_from("<Q", d, p + 16)[0]
+            if (r_info & 0xFFFFFFFF) == 8:  # R_X86_64_RELATIVE
+                reloc_map[r_off] = r_addend
+    return reloc_map
+
+
 def _find_zif_handler(d, fn_name):
-    """Scan ELF file bytes for a zend_function_entry whose fname is `fn_name`.
-    Returns the handler address if found, else None.
+    """Scan ELF for a zend_function_entry whose fname is `fn_name`.
+    Returns handler VMA if found, else None.
 
-    How it works:
-    1. Enumerate occurrences of "<fn_name>\\x00" as null-terminated strings
-       in the binary (candidates for .rodata string pool).
-    2. For each such string's file offset (which equals its VMA since .rodata
-       in PHP's libphp has coincident load address), search for a qword
-       equal to that VMA. That qword is the `fname` field of a candidate
-       zend_function_entry.
-    3. Validate: the next qword (+0x08) must look like a function pointer
-       (in .text range, roughly 0x100000..0x800000 for libphp.so);
-       `arg_info` (+0x10) must point into readable data; `num_args` (+0x18)
-       must be small (<=20).
-
-    Returns the first valid match's handler, or None.
+    Tries direct-byte scan first (Docker/Sury embed string VMAs in file
+    bytes), falls back to R_X86_64_RELATIVE relocation scan (Rocky Remi
+    uses position-independent const pointers filled in at load time).
     """
+    loads = _parse_loads(d)
     target_str = fn_name.encode() + b"\x00"
-    # Find all string occurrences
-    strs = []; start = 0
+
+    # Find all occurrences of "<fn_name>\0" and collect their VMAs. We don't
+    # filter on a preceding \0 because the compiler may merge "system\0" as
+    # the tail of a longer string (e.g. "fsockopen.system\0"); the real
+    # validation gate is whether the matching function_entry has a plausible
+    # handler/arg_info/num_args shape, not whether the string stands alone.
+    str_vmas = set()
+    start = 0
     while True:
         i = d.find(target_str, start)
         if i == -1: break
-        strs.append(i); start = i + 1
-    for sysaddr in strs:
-        needle = struct.pack("<Q", sysaddr)
+        v = _off_to_vma(loads, i)
+        if v is not None: str_vmas.add(v)
+        start = i + 1
+
+    # Approach 1: direct scan — some builds embed the string VMA directly
+    # in the file bytes for the fname field of a zend_function_entry.
+    for sv in str_vmas:
+        needle = struct.pack("<Q", sv)
         pos = 0
         while True:
             i = d.find(needle, pos)
             if i == -1: break
-            # Candidate zend_function_entry at offset i
             try:
-                handler  = struct.unpack_from("<Q", d, i +  8)[0]
+                handler  = struct.unpack_from("<Q", d, i + 8)[0]
                 arg_info = struct.unpack_from("<Q", d, i + 16)[0]
                 num_args = struct.unpack_from("<I", d, i + 24)[0]
             except struct.error: break
-            # Validate: handler in plausible .text range, arg_info in rodata range,
-            # num_args small
             if (0x100000 <= handler <= 0x900000
                     and arg_info > 0x100000
                     and 0 <= num_args <= 20):
                 return handler
             pos = i + 1
+
+    # Approach 2: R_X86_64_RELATIVE relocations — PIE builds that store 0
+    # in the file byte and patch at load time via the dynamic linker.
+    reloc_map = _parse_relative_relocs(d)
+    for r_off, r_addend in reloc_map.items():
+        if r_addend not in str_vmas: continue
+        # Candidate: fname slot. Handler is at r_off + 8.
+        handler = reloc_map.get(r_off + 8)
+        if handler is None: continue
+        # arg_info at r_off + 16, num_args uint32 at r_off + 24 (raw file byte)
+        arg_info = reloc_map.get(r_off + 16)
+        args_off = _vma_to_off(loads, r_off + 24)
+        if args_off is None: continue
+        try: num_args = struct.unpack_from("<I", d, args_off)[0]
+        except struct.error: continue
+        if (0x100000 <= handler <= 0x900000
+                and (arg_info is None or arg_info > 0x100000)
+                and 0 <= num_args <= 20):
+            return handler
     return None
 
 

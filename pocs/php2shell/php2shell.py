@@ -52,7 +52,12 @@ OFFSETS = {
         # Distro-apt builds measured 2026-10-27. Added for operator calibration
         # even where version is pre-8.3.22-grooming (grooming would need re-tuning).
         "ubuntu-apt-8.3.6": (0x233a10, 0x306380),  # Ubuntu 24.04 noble default apt
-        "rocky9-remi-8.3.36": (0x23b650, 0x30b2c0),  # Rocky 9 Remi (patched; useful for --force test)
+        # Rocky 9 Remi — in-the-wild "installed, never updated" scenario is the
+        # top use case. All three vulnerable versions measured empirically.
+        "remi-8.3.35":      (0x2381d0, 0x3051a0),   # Rocky 9 Remi (vulnerable)
+        "remi-8.3.36":      (0x23b650, 0x30b2c0),   # Rocky 9 Remi (patched; --force test)
+        "remi-8.4.26":      (0x24f8e0, 0x4194a0),   # Rocky 9 Remi (vulnerable)
+        "remi-8.5.11":      (0x402ae0, 0x5ef300),   # Rocky 9 Remi (vulnerable)
     },
     "arm64":  {"7.4.33": (0x309640, 0x3f6024), "8.0.30": (0x31ef70, 0x40ddb0),
                "8.1.34": (0x341e08, 0x42e7a0), "8.2.34": (0x36ff48, 0x4606c0),

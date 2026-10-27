@@ -131,7 +131,6 @@ python3 pocs/php2shell/extract_offsets.py /path/to/libphp.so
 | `pocs/php2shell/extract_offsets.py` | Offset-recovery tool for `libphp.so` / `php-fpm` binaries |
 | `pocs/php2shell/php2sweep.py` | Batch harness for scoped CIDR / nmap-XML / list-based probing |
 | `pocs/php2shell/serve_stage2.py` | HTTP server for the stage-2 payload (`--revshell` or `--payload`) |
-| `pocs/php2shell/listener.py` | Minimal callback listener |
 | `pocs/php2shell/stage2.sh` | Reverse-shell payload template |
 | `pocs/php2shell/demo.sh` + `demo.ini` | Fresh-container to interactive shell demo |
 | `lab/` | Docker-compose + Apache/PHP configs for research reproduction |

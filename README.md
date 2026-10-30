@@ -9,6 +9,24 @@ servers**, **against stock configuration**, and **across the Docker build matrix
 > Lab research. Everything measured against local `php:*-apache` containers we
 > control. See `SECURITY.md` for authorized-use notice and defender pointers.
 
+> **Update 2026-10-30.** A complete public exploit chain against a different
+> SAPI landed on GitHub between 25–29 Oct 2026:
+> [KillaBoi/StealMyBitcoin-PoC](https://github.com/KillaBoi/StealMyBitcoin-PoC).
+> 763-line stdlib Python, four stages, author's self-reported reliability 7/10,
+> no retry logic. **Target shape is the PHP CLI built-in server (`php -S`) on
+> `php:8.4.26-fpm-alpine3.23` with `PHP_CLI_SERVER_WORKERS=4` behind nginx** —
+> a Steal My Bitcoin CTF challenge, not production. Author's own note: a
+> Debian `php:8.4.26-fpm` stack on the same version string fails at the
+> code-leak stage because the binary layout differs.
+> This research is unaffected (mod_php on Apache prefork, different SAPI,
+> different offsets, different trigger geometry), but it does retire the
+> framing in the earlier LinkedIn write-up that "no public exploit works."
+> The current honest claim: real one-shot RCE requires a known, calibrated
+> target shape — one is now public for CLI/Alpine; mod_php and Debian FPM
+> remain unproven from a single HTTP request. Patch urgency is unchanged
+> upward: a competent operator with a Docker lab and the right PHP build
+> can reach RCE in hours.
+
 ## What this adds over the public PoCs
 
 - **Deterministic multi-worker exploitation.** Keep-alive pinning + shared-ASLR

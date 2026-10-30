@@ -6,6 +6,45 @@ primitive. For a short overview and quick start, see [`README.md`](README.md).
 
 All measurements are from local lab containers we control.
 
+> **Update 2026-10-30.** The first non-stub public exploit chain for this CVE
+> family dropped between 25–29 Oct 2026:
+> [KillaBoi/StealMyBitcoin-PoC](https://github.com/KillaBoi/StealMyBitcoin-PoC)
+> (a Steal My Bitcoin CTF solution, publicised via tl;dr sec #352).
+> 763-line stdlib Python, four stages, 20 requests max, author's self-reported
+> reliability 7/10 with no retry logic. Target shape:
+> `php:8.4.26-fpm-alpine3.23` running `php -S` (CLI SAPI, not FPM despite the
+> image tag), `PHP_CLI_SERVER_WORKERS=4`, 1 GB memory, behind nginx — the
+> author explicitly flags that a Debian `php:8.4.26-fpm` stack on the same
+> version string fails at the code-leak stage because the binary layout
+> differs. Chain structure: (1) health check, (2) OOM-poison a worker, read
+> heap base from a 256-byte reused-worker session cookie via 8 pipelined
+> consumers, (3) same shape with different sizes to recover a code address
+> (`zval_ptr_dtor`), (4) one 368 kB POST with a forged `HashTable` whose
+> destructor is `zif_system(cmd)`. Reaches `system()` via cleanup, same
+> mechanic as our Stage 3 but a different SAPI and different leak primitives.
+>
+> **What this changes vs doesn't change here.**
+> - **Doesn't change:** our research is mod_php on Apache prefork, a
+>   different SAPI with its own offsets and worker model. KillaBoi's offsets
+>   do not transfer. Our measurement budget and conclusions on
+>   `output_buffering = 4096` as a distro-level barrier, the two-byte
+>   overshoot bound on x86-64, and the no-OOB result under ASan for the
+>   four public byte-string PoCs are all specific to the mod_php chain and
+>   remain correct for it.
+> - **Changes:** the LinkedIn write-up's claim that "no public exploit
+>   demonstrates memory corruption" is retired. KillaBoi's chain demonstrates
+>   memory corruption → RCE on a specific calibrated target. The weaker claim
+>   that remains true: no one has published a shape that works from a single
+>   HTTP request against an unknown PHP build. Target-specific exploitation
+>   is proven, universal exploitation is not.
+> - **Patch argument strengthens.** A competent operator with Docker and a
+>   few hours of calibration can reach RCE on a known target. "No working
+>   public exploit" is no longer defensible as a reason to deprioritise
+>   patching.
+>
+> Reference preserved for calibration-pattern comparison (CLI SAPI vs
+> mod_php) in a future session if a related CTF or disclosure follows.
+
 ## Background (what the bug is)
 
 - **CVE-2026-109618**: an OOM in `_zend_hash_str_add_or_update_i()` (`Zend/zend_hash.c`)
